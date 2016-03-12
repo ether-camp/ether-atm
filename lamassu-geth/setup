@@ -1,0 +1,43 @@
+#!/usr/bin/env node
+'use strict';
+
+var LamassuConfig = require('lamassu-config');
+var promptly = require('promptly');
+
+var config = new LamassuConfig();
+
+console.log('\nSetting up the Blockchain.info wallet plugin.\n');
+console.log('Please enter your API credentials.\n');
+promptly.prompt('GUID (Identifier): ', function(guidErr, guid) {
+  promptly.password('Password: ', function(passwordErr, password) {
+    promptly.prompt('From Address: ', function(fromAddressErr, fromAddress) {
+      updateDb(guid, password, fromAddress, function(err) {
+        if (err) throw err;
+        console.log('\nSuccess.');
+      });
+    });
+  });
+});
+
+function updateDb(guid, password, fromAddress, callback) {
+  var newConfig = {
+    exchanges: {
+      plugins: {
+        settings: {
+          blockchain: {
+            retryInterval: '10000',
+            retryTimeout: '60000',
+            guid: guid,
+            password: password,
+            fromAddress: fromAddress
+          }
+        },
+        current: {
+          transfer: 'blockchain',
+          wallet: 'blockchain'
+        }
+      }
+    }
+  };
+  config.mergeConfig(newConfig, callback);
+}

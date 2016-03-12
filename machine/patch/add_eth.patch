@@ -1,0 +1,1122 @@
+diff -r -u original_files/lib/brain.js modified_files/lib/brain.js
+--- original_files/lib/brain.js	2016-03-10 07:49:15.536486349 -0800
++++ modified_files/lib/brain.js	2016-03-10 07:39:44.813482681 -0800
+@@ -10,6 +10,7 @@
+ var async = require('async');
+ 
+ var SATOSHI_FACTOR = Math.pow(10,8);
++var FINNEY_FACTOR = 1e3;
+ var STATIC_STATES = ['idle', 'networkDown', 'balanceLow', 'unpaired'];
+ var TRANSACTION_STATES = ['acceptingFirstBill', 'billInserted', 'billRead','acceptingBills',
+   'bitcoinsSent', 'completed', 'goodbye'];
+@@ -288,7 +289,8 @@
+     action: this.state,
+     localeInfo: this.localeInfo,
+     currency: this.currency,
+-    exchangeRate: this._exchangeRateRec(this.trader.exchangeRate)
++    exchangeRate: this._exchangeRateRec(this.trader.exchangeRate),
++    exchangeRateEth: this._exchangeRateRecEth(this.trader.exchangeRateEth)
+   };
+ 
+   if (this.state === 'wifiList' && this.wifis) rec.wifiList = this.wifis;
+@@ -336,6 +338,8 @@
+       this._testMode();
+       break;
+     case 'start':
++      this.coin = req.data;
++      console.log('Using coin: ' + this.coin);
+       this._start();
+       break;
+     case 'cancelScan':
+@@ -347,6 +351,9 @@
+     case 'sendBitcoins':
+       this._sendBitcoins();
+       break;
++    case 'sendEthers':
++      this._sendEthers();
++      break;
+     case 'completed':
+       this._completed();
+       break;
+@@ -536,7 +543,7 @@
+     if (err) self.emit('error', err);
+     if (self.sessionId !== sessionId || self.state !== 'scanAddress') return;
+     self._handleScan(address);
+-  });
++  }, this.coin == 'ETH');
+   this.screenTimeout = setTimeout(function() {
+     if (self.state !== 'scanAddress') return;
+     self.qrScanner.cancel();
+@@ -566,13 +573,23 @@
+   };
+ };
+ 
++Brain.prototype._exchangeRateRecEth = function _exchangeRateRecEth(rate) {
++  if (!rate) return null;
++  var fiatToEth = this._truncateBitcoins(1 / rate);
++  return {
++    ethToFiat: rate,
++    fiatToEth: fiatToEth
++  };
++};
++
+ Brain.prototype._pollUpdate = function _pollUpdate() {
+   var locale = this.trader.locale;
+   this.currency = locale.currency;
+   this.localeInfo = locale.localeInfo;
+   var rec = {
+     currency: this.currency,
+-    exchangeRate: this._exchangeRateRec(this.trader.exchangeRate)
++    exchangeRate: this._exchangeRateRec(this.trader.exchangeRate),
++    exchangeRateEth: this._exchangeRateRecEth(this.trader.exchangeRateEth)
+   };
+   if (_.contains(STATIC_STATES, this.state)) {
+     rec.localeInfo = this.localeInfo;
+@@ -584,7 +601,13 @@
+   // Don't show Out of Bitcoins on validator restart
+   if (!this.billValidator.hasDenominations()) return;
+ 
+-  var fiatBalance = this.trader.balance;
++  var fiatBalance;
++  if (this.coin == 'BTC') {
++      fiatBalance = this.trader.balance;
++  } else {
++      fiatBalance = this.trader.balanceEth;
++  }
++
+   var highestBill = this.billValidator.highestBill(fiatBalance);
+   if (highestBill) this._balanceAdequate();
+   else this._balanceLow();
+@@ -625,6 +648,7 @@
+ };
+ 
+ Brain.prototype._balanceLow = function _balanceLow() {
++    return;
+   this.balanceLow = true;
+   if (this.state === 'balanceLow') return;
+   if (_.contains(BILL_ACCEPTING_STATES, this.state)) {
+@@ -695,9 +719,21 @@
+ 
+   // Trader balance is balance as of start of user session.
+   // Reduce it by fiat we owe user.
+-  var fiatBalance = this.trader.balance - totalFiat;
++  var fiatBalance;
++  if (this.coin == 'BTC') {
++      fiatBalance = this.trader.balance - totalFiat;
++  } else {
++      fiatBalance = this.trader.balanceEth - totalFiat;
++  }
++
++
++  var txLimit;
++  if (this.coin == 'BTC') {
++      txLimit = this.trader.txLimit;
++  } else {
++      txLimit = this.trader.txLimitEth;
++  }
+ 
+-  var txLimit = this.trader.txLimit;
+   if (txLimit && totalFiat > txLimit) {
+     this.billValidator.reject();
+     this.pending = null;
+@@ -712,6 +748,7 @@
+     return;
+   }
+ 
++  console.log('FIAT balance: ' + fiatBalance);
+   if (fiatBalance >= 0) {
+     this.billValidator.stack();
+     highestBill = this.billValidator.highestBill(fiatBalance);
+@@ -720,11 +757,13 @@
+       this.billValidator.disable();
+       this._balanceLow();
+     }
+-    this.browser.send({
++    var sendToBrowser = {
+       action: 'acceptingBill',
+       credit: this._uiCredit(),
+       sendOnly: sendOnly
+-    });
++    };
++    console.log('SENDING to BROWSER: ' + JSON.stringify(sendToBrowser));
++    this.browser.send(sendToBrowser);
+     this._setState('billRead');
+   } else {
+     this.billValidator.reject();
+@@ -759,6 +798,7 @@
+   this.pending = null;
+   this.credit.fiat += pending.fiat;
+   this.credit.satoshis += pending.satoshis;
++  this.credit.finneys += pending.finneys;
+   this.credit.lastBill = pending.fiat;
+ 
+   // Puts in the trade to cover currency exchange risk
+@@ -766,9 +806,15 @@
+   var tradeRec = _.clone(pending);
+   tradeRec.currency = this.currency;  // TODO: This should be a per tx attribute
+   tradeRec.sessionId = this.sessionId;
+-  this.trader.trade(tradeRec);
++  var txLimit;
++  if (this.coin == 'BTC') {
++      this.trader.trade(tradeRec);
++      txLimit = this.trader.txLimit;
++  } else {
++      this.trader.tradeEth(tradeRec);
++      txLimit = this.trader.txLimitEth;
++  }
+ 
+-  var txLimit = this.trader.txLimit;
+   if (txLimit !== null &&
+       this.credit.fiat + this.billValidator.lowestBill() > txLimit) {
+     this.billValidator.disable();
+@@ -776,20 +822,43 @@
+   }
+ 
+   var self = this;
+-  this._screenTimeout(function() { self._sendBitcoins(); },
++  this._screenTimeout(function() { 
++    if (self.coin == 'BTC') {
++      self._sendBitcoins(); 
++    } else {
++        self._sendEthers();
++    }
++  
++  },
+       this.config.billTimeout);
+ 
+   if (this.sendOnValid) {
+     this.sendOnValid = false;
+-    this._doSendBitcoins();
++    if (this.coin == 'BTC') {
++        this._doSendBitcoins();
++    } else {
++        this._doSendEthers();
++    }
++  }
++  var rec;
++
++  if (this.coin == 'BTC') {
++      rec = {
++        sessionId: this.sessionId,
++        bill: pending.fiat,
++        currency: this.currency,
++        bitcoins: this._satoshisToBitcoins(pending.satoshis),
++        satoshis: this._truncateSatoshis(pending.satoshis),
++      };
++  } else {
++      rec = {
++        sessionId: this.sessionId,
++        bill: pending.fiat,
++        currency: this.currency,
++        ethers: this._finneysToEthers(pending.finneys),
++        finneys: this._truncateFinneys(pending.finneys),
++      };
+   }
+-  var rec = {
+-    sessionId: this.sessionId,
+-    bill: pending.fiat,
+-    currency: this.currency,
+-    bitcoins: this._satoshisToBitcoins(pending.satoshis),
+-    satoshis: this._truncateSatoshis(pending.satoshis),
+-  };
+   this._logTx(rec, 'validateBill');
+ };
+ 
+@@ -811,7 +880,11 @@
+     this.sendOnValid = false;
+     if (credit !== null) {
+       this._setState('acceptingBills');
+-      this._doSendBitcoins();
++      if (this.coin == 'BTC') {
++          this._doSendBitcoins();
++      } else {
++          this._doSendEthers();
++      }
+       this.browser.send({credit: credit});
+       return;
+     }
+@@ -843,42 +916,69 @@
+   var credit = this.credit;
+   var fiat = credit.fiat;
+   var satoshis = credit.satoshis;
++  var finneys = credit.finneys;
+   var lastBill = null;
+ 
+   if (this.pending) {
+     var pending = this.pending;
+     fiat += pending.fiat;
+     satoshis += pending.satoshis;
++    finneys += pending.finneys;
+     lastBill = pending.fiat;
+   } else {
+     lastBill = credit.lastBill;
+   }
+ 
+-  var bitcoins = this._satoshisToBitcoins(satoshis);
+-  return {
+-    fiat: fiat,
+-    bitcoins: bitcoins,
+-    lastBill: lastBill
+-  };
++  if (this.coin == 'BTC') {
++      var bitcoins = this._satoshisToBitcoins(satoshis);
++      return {
++        fiat: fiat,
++        bitcoins: bitcoins,
++        lastBill: lastBill
++      };
++  } else {
++      var ethers = this._finneysToEthers(finneys);
++      return {
++        fiat: fiat,
++        ethers: ethers,
++        lastBill: lastBill
++      };
++  }
+ };
+ 
+ Brain.prototype._satoshisToBitcoins = function _satoshisToBitcoins(satoshis) {
+   return this._truncateBitcoins(satoshis / SATOSHI_FACTOR);
+ };
+ 
++Brain.prototype._finneysToEthers = function _finneysToEthers(finneys) {
++  return this._truncateBitcoins(finneys / FINNEY_FACTOR);
++};
++
+ Brain.prototype._createPendingTransaction =
+     function _createPendingTransaction(bill) {
+   console.assert(this.pending === null);
+   var exchangeRate = this.trader.exchangeRate;
++  var ethExchangeRate = this.trader.exchangeRateEth;
+   console.assert(exchangeRate, 'Exchange rate not set');
+-  var satoshiRate = SATOSHI_FACTOR / exchangeRate;
+-  var satoshis = this._truncateSatoshis(bill * satoshiRate);
++  if (this.coin == 'BTC') {
++      var satoshiRate = SATOSHI_FACTOR / exchangeRate;
++      var satoshis = this._truncateSatoshis(bill * satoshiRate);
++
++      this.pending = {
++        fiat: bill,
++        exchangeRate: exchangeRate,
++        satoshis: satoshis
++      };
++  } else {
++      var finneyRate = FINNEY_FACTOR / ethExchangeRate;
++      var finneys = this._truncateFinneys(bill * finneyRate);
+ 
+-  this.pending = {
+-    fiat: bill,
+-    exchangeRate: exchangeRate,
+-    satoshis: satoshis
+-  };
++      this.pending = {
++        fiat: bill,
++        exchangeRate: ethExchangeRate,
++        finneys: finneys
++      };
++  }
+ };
+ 
+ Brain.prototype._sendBitcoins = function _sendBitcoins() {
+@@ -891,6 +991,16 @@
+   else this.sendOnValid = true;
+ };
+ 
++Brain.prototype._sendEthers = function _sendBitcoins() {
++  this.browser.send({
++    action: 'etherTransferPending',
++    buyerAddress: this.bitcoinAddress
++  });
++
++  if (this.state === 'acceptingBills') this._doSendEthers();
++  else this.sendOnValid = true;
++};
++
+ Brain.prototype._doSendBitcoins = function _doSendBitcoins() {
+   this._setState('bitcoinsSent', 'acceptingBills');
+   this.billValidator.disable();
+@@ -927,6 +1037,44 @@
+     });
+ };
+ 
++Brain.prototype._doSendEthers = function _doSendEthers() {
++  this._setState('bitcoinsSent', 'acceptingBills');
++  this.billValidator.disable();
++
++  this.pending = null;
++
++  this.lastTransaction = {
++    address: this.bitcoinAddress,
++    credit: this._uiCredit()
++  };
++
++  var self = this;
++  var finneys = this._truncateFinneys(this.credit.finneys);
++
++  var rec = {
++    sessionId: this.sessionId,
++    ethers: this._finneysToEthers(this.credit.finneys),
++    finneys: finneys,
++    fiat: this.credit.fiat,
++    currency: this.currency
++  };
++  this._logTx(rec, 'ethersRequested');
++
++  var tx = {
++    txId: this.sessionId,
++    toAddress: this.bitcoinAddress,
++    finneys: finneys,
++    currencyCode: this.currency,
++    fiat: this.credit.fiat
++  };
++  this.trader.sendEthers(tx, function(err, transactionHash) {
++      if (err) self._sendEthersError(err);
++      else self._sendEthersHandler(transactionHash);
++    });
++};
++
++
++
+ // Giving up, go to special screens asking user to contact operator
+ Brain.prototype._sendBitcoinsError = function _sendBitcoinsError(err) {
+   var rec = {
+@@ -953,6 +1101,31 @@
+   this._screenTimeout(this._idle.bind(this), 10000);
+ };
+ 
++Brain.prototype._sendEthersError = function _sendEthersError(err) {
++  var rec = {
++    sessionId: this.sessionId,
++    error: err.message
++  };
++  this._logTx(rec, 'error');
++  console.log('Error sending ethers: %s', err.message);
++
++  // TODO TEMP need new, friendly screens for this
++
++  // Giving up
++  this.billsPending = false;
++  this._resetState();
++
++  var self = this;
++  if (err.status === 'InsufficientFunds') {
++    setTimeout(function () { self._idle(); }, self.config.insufficientFundsTimeout);
++    return this._transitionState('insufficientFunds');
++  }
++
++  this._transitionState('withdrawFailureEth');
++  this.networkDown = true;
++  this._screenTimeout(this._idle.bind(this), 10000);
++}
++
+ Brain.prototype._truncateBitcoins = function _truncateBitcoins(bitcoins) {
+   var decimalDigits = this._bitcoinFractionalDigits(bitcoins);
+   var adjuster = Math.pow(10, decimalDigits);
+@@ -965,6 +1138,12 @@
+   return Math.floor(truncated * SATOSHI_FACTOR);
+ };
+ 
++Brain.prototype._truncateFinneys = function _truncateFinneys(satoshis) {
++  var bitcoins = satoshis / FINNEY_FACTOR;
++  var truncated = this._truncateBitcoins(bitcoins);
++  return Math.floor(truncated * FINNEY_FACTOR);
++};
++
+ // And... we're done!
+ Brain.prototype._sendBitcoinsHandler =
+     function _sendBitcoinsHandler(transactionHash) {
+@@ -993,6 +1172,35 @@
+   this._screenTimeout(this._completed.bind(this), this.config.completedTimeout);
+ };
+ 
++Brain.prototype._sendEthersHandler =
++    function _sendEthersHandler(transactionHash) {
++  this._setState('completed');
++
++  var url = transactionHash ?
++    'http://blockchain.info/tx/' + transactionHash :
++    'http://blockchain.info/address/' + this.bitcoinAddress;
++  this.browser.send({
++    action: 'etherTransferComplete',
++    transactionHashURL: url
++  });
++
++  var rec = {
++    sessionId: this.sessionId,
++    transactionHash: transactionHash,
++    ethers: this._finneysToEthers(this.credit.finneys),
++    finneys: this._truncateFinneys(this.credit.finneys),
++    fiat: this.credit.fiat,
++    currency: this.currency
++  };
++  this._logTx(rec, 'bitcoinsSent');
++
++  this.billsPending = false;
++  this._resetState();
++  this._screenTimeout(this._completed.bind(this), this.config.completedTimeout);
++};
++
++
++
+ Brain.prototype._screenTimeoutHandler = function _screenTimeoutHandler(callback) {
+   this.currentScreenTimeout = null;
+   callback();
+@@ -1066,6 +1274,7 @@
+   this.bitcoinAddress = null;
+   this.credit.fiat = 0;
+   this.credit.satoshis = 0;
++  this.credit.finneys = 0;
+   this.credit.lastBill = null;
+   this.pending = null;
+ };
+diff -r -u original_files/lib/qrscanner.js modified_files/lib/qrscanner.js
+--- original_files/lib/qrscanner.js	2016-03-10 07:49:15.524486371 -0800
++++ modified_files/lib/qrscanner.js	2016-03-10 07:42:52.213151590 -0800
+@@ -36,7 +36,7 @@
+   cp.exec('killall zbarcam');
+ };
+ 
+-QrScanner.prototype.scan = function scan(cb) {
++QrScanner.prototype.scan = function scan(cb, isEth) {
+   console.log('Connecting to camera at ' + this.config.device);
+   if (this.zbar) console.log('WARNING: zbar is active!');
+ 
+@@ -52,7 +52,7 @@
+       var data = self.string.slice(0, -1);
+       self.string = '';
+       var result = self.scanType === 'bitcoinAddress' ?
+-        self._processBitcoinURI(data) :
++        (isEth ? self._processEtherURI(data) : self._processBitcoinURI(data)) :
+         self._processPairing(data);
+ 
+       if (result === null) return;
+@@ -87,6 +87,12 @@
+   return address;
+ };
+ 
++QrScanner.prototype._processEtherURI = function _processEtherURI(data) {
++  var address = this._parseEtherURI(data);
++  if (!address) return null;
++  return address;
++};
++
+ QrScanner.prototype.cancel = function cancel() {
+   if (this.zbar) this.zbar.kill();
+   this._reset();
+@@ -100,6 +106,20 @@
+   } else return address;
+ };
+ 
++QrScanner.prototype._parseEtherURI = function _parseBitcoinURI(uri) {
++  var res = /^(ether:\/{0,2})?(\w+)/.exec(uri);
++  var address = res && res[2];
++  if (!address || address == 'iban') {
++    res = /^(iban:\/{0,2})?(\w+)/.exec(uri);
++    address = res && res[2];
++    if (!address) {
++        return null;
++    } else return address;
++  } else return address;
++};
++
++
++
+ QrScanner.prototype._reset = function _reset() {
+   this.zbar = null;
+   this.string = '';
+diff -r -u original_files/lib/trader.js modified_files/lib/trader.js
+--- original_files/lib/trader.js	2016-03-10 07:49:15.532486357 -0800
++++ modified_files/lib/trader.js	2016-03-10 07:39:47.865477247 -0800
+@@ -135,17 +135,76 @@
+   async.doUntil(send, testResponse, handler);
+ };
+ 
++Trader.prototype.sendEthers = function sendEthers(tx, cb) {
++  var self = this;
++  var result = null;
++  var t0 = Date.now();
++  var config = this.config;
++  var timeOut = config.settings.sendTimeout;
++  var interval = config.settings.retryInterval;
++
++  function testResponse() {
++    return result !== null || Date.now() - t0 > timeOut;
++  }
++
++  function send(lcb) {
++    self._sendEthers(tx, function(err, _result) {
++      // Don't fail on most errors, we're just going to keep trying.
++      // TODO: We might want to fail on some kinds of errors.
++      if (err && err.status === 'InsufficientFunds') return lcb(err);
++      if (!err) {
++        result = _result;
++        return lcb();   // return immediately if no network error
++      }
++
++      setTimeout(lcb, interval);
++    });
++  }
++
++  function handler(err) {
++    if (err) return cb(err);
++    if (result === null || !result.txHash)
++      return cb(new Error('sendBitcoins timeout'));
++    cb(null, result.txHash);
++  }
++
++  // Continue calling this idempotent API call until we get a response or timeout.
++  async.doUntil(send, testResponse, handler);
++};
++
++
++
+ Trader.prototype._sendBitcoins = function _sendBitcoins(tx, cb) {
++  console.log('SENDING ' + JSON.stringify(tx));
++  tx.coin = 'BTC';
+   this._request({
+     path: '/send',
+     method: 'POST',
+     body: tx
+   }, function (err, res, body) {
++    console.log('ERROR ' + err);
++    if (err) return cb(err);
++    cb(null, body);
++  });
++};
++
++Trader.prototype._sendEthers = function _sendEthers(tx, cb) {
++  console.log('SENDING ' + JSON.stringify(tx));
++  tx.coin = 'ETH';
++  this._request({
++    path: '/sendEth',
++    method: 'POST',
++    body: tx
++  }, function (err, res, body) {
++    console.log('ERROR ' + err);
+     if (err) return cb(err);
+     cb(null, body);
+   });
+ };
+ 
++
++
++
+ Trader.prototype.trigger = function trigger() {
+   var self = this;
+ 
+@@ -159,6 +218,13 @@
+     if (err) return self._pollHandler(err);
+     self._pollHandler(null, body);
+   });
++  self._request({
++    path: '/pollEth',
++    method: 'GET'
++  }, function (err, res, body) {
++    if (err) return self._pollHandlerEth(err);
++    self._pollHandlerEth(null, body);
++  });
+ };
+ 
+ // TODO: Keep trying, like sendBitcoins
+@@ -175,6 +241,21 @@
+   }, function () {});
+ };
+ 
++Trader.prototype.tradeEth = function tradeEth(rec) {
++  this._request({
++    path: '/tradeEth',
++    method: 'POST',
++    body: {
++      fiat: rec.fiat,
++      finneys: rec.finneys,
++      currency: rec.currency,
++      sessionId: rec.sessionId
++    }
++  }, function () {});
++};
++
++
++
+ // Private functions
+ 
+ Trader.prototype._pollHandler = function _pollHandler(err, res) {
+@@ -212,6 +293,43 @@
+   this.emit('networkUp');
+ };
+ 
++Trader.prototype._pollHandlerEth = function _pollHandlerEth(err, res) {
++  if (err && err.status === 'networkDown') {
++    if (_t0 === null) {
++      _t0 = Date.now();
++      return;
++    }
++
++    if (Date.now() - _t0 > this.config.settings.pollTimeout) {
++      _t0 = null;
++      this.emit('networkDown');
++      return;
++    }
++  }
++
++  if (err && err.status === 'unpair') {
++    this.emit('unpair');
++    return;
++  }
++
++  _t0 = null;
++
++  // Not a network error, so no need to keep trying
++  if (err) {
++    this.emit('networkDown');
++    return;
++  }
++
++  this.txLimitEth = res.txLimit;
++  this.exchangeRateEth = res.rate;
++  this.balanceEth = res.fiat;
++  this.locale = res.locale;
++  this.emit('pollUpdate');
++  this.emit('networkUp');
++};
++
++
++
+ function _richError(errMessage, status) {
+   var err = new Error(errMessage);
+   err.status = status;
+diff -r -u original_files/ui/css/main.css modified_files/ui/css/main.css
+--- original_files/ui/css/main.css	2016-03-10 07:49:15.532486357 -0800
++++ modified_files/ui/css/main.css	2016-03-10 07:39:58.969457483 -0800
+@@ -160,7 +160,8 @@
+   left: 200; right: auto;
+ }
+ 
+-#scan-address {
++#scan-address,
++#scan-address-eth {
+   font-size: 80px;
+   color: #FFFFFF;
+   line-height: 1;
+@@ -168,21 +169,24 @@
+   width: 600px;
+ }
+ 
+-#hold-qr-code {
++#hold-qr-code,
++#hold-qr-code-eth {
+   font-size: 30px;
+   color: #5F5F55;
+   line-height: 42px;
+   width: 400px;
+ }
+ 
+-#phones {
++#phones,
++#phones-eth {
+   /* position: absolute; top: 184; left: 861;*/
+   top: 139;
+ }
+ 
+-.i18n-rtl #phones { left: 70; }
++.i18n-rtl #phones, .i18n-rtl #phones-eth { left: 70; }
+ 
+-#phone {
++#phone,
++#phone-eth {
+   margin-top: 0;
+   margin-left: 0;
+   padding-top: 70px;
+@@ -207,13 +211,15 @@
+   }
+ }
+ 
+-#phones img {
++#phones img,
++#phones-eth img {
+   position:absolute;
+   left:0;
+   -webkit-transition: opacity 2s ease-in-out;
+ }
+ 
+-#phones img.top {
++#phones img.top,
++#phones-eth img.top {
+   -webkit-animation-name: cf3FadeInOut;
+   -webkit-animation-timing-function: ease-in-out;
+   -webkit-animation-iteration-count: infinite;
+@@ -228,7 +234,8 @@
+   top: 175; left: 75;
+ }
+ 
+-#insert-bill {
++#insert-bill,
++#insert-bill-eth {
+   font-size: 80px;
+   color: #FFFFFF;
+   line-height: 1;
+@@ -290,7 +297,8 @@
+ }
+ 
+ /* 4th Screen */
+-#send-coins {
++#send-coins,
++#send-coins-eth {
+   margin: 0 auto;
+   width: 175px; height: 175px;
+   padding: 30px;
+@@ -322,21 +330,25 @@
+   font-size: 80%;
+ }
+ 
+-#deposit-side {
++#deposit-side,
++#deposit-side-eth {
+   position: absolute;
+   top: 115; left: 774;
+   width: 500px;
+ }
+ 
+-.i18n-rtl #deposit-side {
++.i18n-rtl #deposit-side,
++.i18n-rtl #deposit-side-eth {
+   right: 100; left: auto;
+ }
+ 
+-#deposit-side strong {
++#deposit-side strong,
++#deposit-side-eth strong {
+   font-weight: bold;
+ }
+ 
+-#send-side {
++#send-side,
++#send-side-eth {
+   position: absolute;
+   top: 115; left: 106;
+ }
+@@ -349,11 +361,13 @@
+   line-height: 1.2;
+ }
+ 
+-#limit-reached-section {
++#limit-reached-section,
++#limit-reached-section-eth {
+   display: none;
+ }
+ 
+-#insert-another, #js-i18n-limit-reached {
++#insert-another, #js-i18n-limit-reached,
++#insert-another-eth, #js-i18n-limit-reached-eth {
+   font-size: 40px;
+   color: #FFFFFF;
+   line-height: 1.2;
+@@ -361,7 +375,8 @@
+   margin: 40px 0 10px 0;
+ }
+ 
+-#js-i18n-limit-description {
++#js-i18n-limit-description,
++#js-i18n-limit-description-eth {
+   vertical-align: top;
+   font-size: 30px;
+   color: #5F5F55;
+@@ -394,7 +409,8 @@
+ #networks { text-align: left; }
+ .i18n-rtl #more-networks { direction: rtl; unicode-bidi: bidi-override; }
+ 
+-.total .amount strong, #deposit-side .total-deposit strong {
++.total .amount strong, #deposit-side .total-deposit strong,
++.total .amount strong, #deposit-side-eth .total-deposit strong {
+   font-weight: 900;
+ }
+ 
+@@ -406,7 +422,8 @@
+   text-align: right;
+ }
+ 
+-#js-i18n-just-inserted strong {
++#js-i18n-just-inserted strong,
++#js-i18n-just-inserted-eth strong {
+   font-weight: 900;
+ }
+ 
+@@ -559,11 +576,11 @@
+   background: #FFFFFF url('../images/error_bg.png') no-repeat 40px 40px;
+ }
+ 
+-.limit_reached_state, .high_bill_state {
++.limit_reached_state, .limit_reached_eth_state, .high_bill_state {
+   background: #FFFFFF url('../images/limit_reached.png') no-repeat center 440px;
+ }
+ 
+-.limit_reached_state .content, .high_bill_state .content {
++.limit_reached_state .content, .limit_reached_eth_state .content, .high_bill_state .content {
+   margin-bottom: 150px;
+ }
+ 
+@@ -609,7 +626,8 @@
+   position: absolute; bottom: 0px;
+ }
+ 
+-.current-btc {
++.current-btc,
++.current-eth {
+   font-size: 34px;
+   color: #D0D0C8;
+   line-height: 47px;
+@@ -617,7 +635,15 @@
+   top: 10;
+   left: 60;
+ }
+-.i18n-rtl .current-btc { right: 60px; left: auto; }
++.current-btc-main {
++    top:0;
++    line-height:25px;
++}
++.current-eth-main {
++    top:50;
++    line-height:25px;
++}
++.i18n-rtl .current-btc, .i18n-rtl .current-eth { right: 60px; left: auto; }
+ 
+ .bitcoin-machine {
+   font-weight: 200;
+@@ -937,4 +963,11 @@
+ 
+ .admin li {
+   list-style-type: none;
+-}
+\ No newline at end of file
++}
++.ether-fixed {
++    position:fixed;
++    top: 10;
++    left: 10;
++    width:100px;
++    height:100px;
++}
+diff -r -u original_files/ui/start.html modified_files/ui/start.html
+--- original_files/ui/start.html	2016-03-10 07:49:15.520486377 -0800
++++ modified_files/ui/start.html	2016-03-10 07:43:20.101102724 -0800
+@@ -379,12 +379,14 @@
+         <section class="main">
+           <h1 id="hey" class="js-i18n">Hello.</h1>
+           <section id="start-buttons" class="start-buttons">
+-            <div class="circle-button"><span class="js-i18n">START</span></div>
++            <div data-coin="BTC" class="circle-button"><span class="js-i18n">Bitcoin</span></div>
++            <div data-coin="ETH" class="circle-button"><span class="js-i18n">Ether</span><img style="width:80%" src="images/eth.png"></img></div>
+           </section>
+-          <p id="tap" class="js-i18n">Tap to buy bitcoins in 3 steps</p>
++          <p id="tap">Tap to buy bitcoins or ethers in 3 steps</p>
+         </section>
+         <section class="bottom-bar">
+-          <p class="js-i18n js-i18n-current-bitcoin-price current-btc">Loading Bitcoin price...</p>
++          <p class="js-i18n js-i18n-current-bitcoin-price current-btc current-btc-main">Loading Bitcoin price...</p>
++          <p class="js-i18n js-i18n-current-ether-price current-eth current-eth-main">Loading Ether price...</p>
+           <p class="bitcoin-machine js-i18n">The Bitcoin Machine</p>
+         </section>
+       </section>
+@@ -408,6 +410,28 @@
+         <section id="scanCancel" class="cancel"><img src="images/cancel.png" /></section>
+       </section>
+ 
++      <section class="viewport scan_address_eth_state" data-tr-section="scan-address-eth">
++        <img class="ether-fixed" src="images/eth.png">
++        <section class="main">
++          <section id="scan-instructions-eth" class="primary-side">
++            <h1 id="scan-address-eth" class="js-i18n">Scan your Ether address</h1>
++            <p id="hold-qr-code-eth">
++              <span class="js-i18n">Hold your QR code up to the scan window to proceed.</span>
++            </p>
++          </section>
++          <div id="phones-eth" class="secondary-side">
++            <img src="images/phone-2.png" />
++            <img id="phone-eth" class="top" src="images/smartphone.png" />
++          </div>
++        </section>
++        <section class="bottom-bar">
++          <p class="js-i18n js-i18n-current-ether-price current-eth">Loading Ether price...</p>
++        </section>
++        <section id="scanCancel-eth" class="cancel"><img src="images/cancel.png" /></section>
++      </section>
++
++
++
+       <section class="viewport insert_bills_state" data-tr-section="insert-bills">
+         <section class="main">
+           <section class="primary-side">
+@@ -436,6 +460,37 @@
+         <section id="insertBillCancel" class="cancel"><img src="images/cancel.png" /></section>
+       </section>
+ 
++      <section class="viewport insert_bills_eth_state" data-tr-section="insert-bills_eth">
++        <img class="ether-fixed" src="images/eth.png">
++        <section class="main">
++          <section class="primary-side">
++            <h1 id="insert-bill-eth" class="js-i18n">Insert a bill</h1>
++            <p class="send-to-your-address"><span class="js-i18n">Your ethers will be sent to:</span><br/>
++            <span class="bitcoin-address"></span></p>
++            <p class="btc-rate">
++              <span class="btc reverse-exchange-rate i18n-latin">
++                <span class="btc-amount i18n-latin"></span>
++                <span class="bitcoin-units i18n-latin">ETH</span>
++              </span>
++              <span id="fiat-inserted"></span>
++            </p>
++          </section>
++          <section class="secondary-side">
++            <section class="bill-slot">
++              <img class="slot" src="images/slot.png" />
++              <div class="bill"><img src="images/bill.png" /></div>
++              <img class="slot-top" src="images/slot_top.png" />
++            </section>
++          </section>
++        </section>
++        <section class="bottom-bar">
++          <p class="js-i18n js-i18n-current-ether-price current-eth">Loading Ether price...</p>
++        </section>
++        <section id="insertBillCancel-eth" class="cancel"><img src="images/cancel.png" /></section>
++      </section>
++
++
++
+       <section class="viewport insert_more_bills_state" data-tr-section="insert-more-bills">
+         <section class="main">
+           <section id="send-side">
+@@ -475,6 +530,49 @@
+         </section>
+       </section>
+ 
++
++      <section class="viewport insert_more_bills_eth_state" data-tr-section="insert-more-bills_eth">
++        <img class="ether-fixed" src="images/eth.png">
++        <section class="main">
++          <section id="send-side-eth">
++            <p id="tap-complete" class="js-i18n">Tap to complete purchase</p>
++            <div id="send-coins-eth" class="circle-button"><span class="js-i18n">SEND ETHERS</span></div>
++          </section>
++          <svg class="or-circle" xmlns="http://www.w3.org/2000/svg" version="1.1">
++            <circle cx="680" cy="180" r="30" />
++          </svg>
++          <div class="or"><span id="js-i18n-or-eth" class="js-i18n">OR</span></div>
++
++          <section id="deposit-side-eth">
++            <section id="limit-reached-section-eth">
++              <p id="js-i18n-limit-reached-eth"></p>
++              <p id="js-i18n-limit-description-eth"></p>
++            </section>
++            <p id="insert-another-eth" class="js-i18n">Insert another bill</p>
++            <div class="deposit-record">
++              <p>
++                <span class="total">
++                  <span class="total-deposit amount"></span>
++                </span><br/>
++                <span class="js-i18n">deposited so far</span>
++              </p>
++              <p>
++                <span class="total-eth-rec total">
++                  <span class="btc-amount total-btc amount i18n-latin"></span>
++                  <span class="bitcoin-units i18n-latin">BTC</span>
++                </span><br/>
++                <span class="js-i18n">total ethers purchased</span>
++              </p>
++            </div>
++          </section>
++        </section>
++        <section class="bottom-bar">
++          <p class="feedback"><span id="js-i18n-just-inserted-eth"></span></p>
++        </section>
++      </section>
++
++
++      
+      <section id="completed_viewport" class="viewport completed_state" data-tr-section="completed">
+         <section class="main">
+           <section id="deposit-summary">
+@@ -503,6 +601,37 @@
+         </section>
+       </section>
+ 
++     <section id="completed_viewport-eth" class="viewport completed_eth_state" data-tr-section="completed-eth">
++        <img class="ether-fixed" src="images/eth.png">
++        <section class="main">
++          <section id="deposit-summary">
++            <h1 id="thanks" class="js-i18n">Thank you!</h1>
++            <div class="deposit-record">
++              <p>
++                <span class="total-eth-rec total i18n-latin">
++                <span class="btc-amount total-btc amount i18n-latin"></span>
++                <span class="bitcoin-units i18n-latin">ETH</span>
++                </span>
++                <br/>
++                <span class="js-i18n">total ethers purchased</span>
++              </p>
++            </div>
++            <p><span class="js-i18n">Your ethers are on their way to:</span><br/>
++            <span class="bitcoin-address">1Kjrv5PrQQaArvQc2B3D72J7zEGDJFBi5A</span></p>
++          </section>
++          <section id="qr-section">
++            <img id="qr-frame" src="images/qr_code.png" />
++            <div id="qr-content"/><div id="qr-code"></div></div>
++            <p id="qr-caption" class="js-i18n">View your transaction</p>
++          </section>
++        </section>
++        <section class="bottom-bar">
++          <p class="current-btc js-i18n">Tap anywhere when you're done.</p>
++        </section>
++      </section>
++
++ 
++
+       <section class="viewport goodbye_state" data-tr-section="goodbye">
+         <section class="main">
+           <p id="cya" class="js-i18n">See You!</p>
+@@ -602,6 +731,21 @@
+         </section>
+       </section>
+ 
++      <section class="viewport limit_reached_eth_state info" data-tr-section="limit-reached-eth">
++        <img class="ether-fixed" src="images/eth.png">
++        <section class="main">
++          <section class="top">
++            <section class="content">
++                <h1 class="js-i18n">We're all out of ethers!</h1>
++                <p><strong class="js-i18n">Please ask for assistance.</strong></p>
++            </section>
++          </section>
++          <section class="bottom"></section>
++        </section>
++      </section>
++
++
++
+       <section class="viewport high_bill_state info" data-tr-section="high-bill">
+         <section class="main">
+           <section class="top">
+@@ -650,6 +794,26 @@
+         </section>
+       </section>
+ 
++      <section class="viewport sending_coins_eth_state info" data-tr-section="sending-coins-eth">
++        <section class="main">
++          <section class="top">
++            <section class="content">
++              <h1 class="js-i18n">Sending ethers…</h1>
++                <div class="loader"><img src="images/loading.gif" /></div>
++               <p>
++                <strong class="js-i18n">Your ethers are on their way to:</strong><br/>
++                <span class="bitcoin-address"></span>
++               </span>
++               </p>
++            </section>
++          </section>
++          <section class="bottom">
++          </section>
++        </section>
++      </section>
++
++
++
+       <section class="viewport wifi_failed_state info" data-tr-section="wifi-failed">
+         <section class="main">
+           <section class="top">

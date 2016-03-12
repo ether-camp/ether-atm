@@ -1,0 +1,74 @@
+{
+  "name": "lamassu-bitstamp",
+  "version": "1.0.2",
+  "description": "Lamassu Bitstamp ticker and trader",
+  "main": "index.js",
+  "scripts": {
+    "test": "mocha"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lamassu/lamassu-bitstamp.git"
+  },
+  "keywords": [
+    "Lamassu",
+    "Bitstamp",
+    "Bitcoin"
+  ],
+  "author": {
+    "name": "Lamassu",
+    "url": "https://lamassu.is"
+  },
+  "license": "unlicense",
+  "bugs": {
+    "url": "https://github.com/lamassu/lamassu-bitstamp/issues"
+  },
+  "bin": {
+    "bitstamp-setup": "./setup"
+  },
+  "devDependencies": {
+    "chai": "^1.9.1",
+    "mocha": "^1.21.4"
+  },
+  "dependencies": {
+    "async": "^0.2.10",
+    "chai": "^3.5.0",
+    "ethereumjs-tx": "^1.1.1",
+    "keythereum": "^0.2.5",
+    "kraken-api": "^0.1.7",
+    "lamassu-config": "^1.0.0",
+    "lodash": "^2.4.2",
+    "mocha": "^2.4.5",
+    "promptly": "^0.2.1",
+    "web3": "^0.15.3",
+    "wreck": "^3.0.0"
+  },
+  "gitHead": "150e35d8392af105f6cbc4a31ca5c5f7aaad80b8",
+  "homepage": "https://github.com/lamassu/lamassu-bitstamp",
+  "_id": "lamassu-bitstamp@1.0.2",
+  "_shasum": "df8d903cb37e8ae4e4658e6e74bbea5efbf5026f",
+  "_from": "lamassu-bitstamp@>=1.0.2 <2.0.0",
+  "_npmVersion": "2.1.11",
+  "_nodeVersion": "0.10.18",
+  "_npmUser": {
+    "name": "joshmh",
+    "email": "joshmh@gmail.com"
+  },
+  "maintainers": [
+    {
+      "name": "joshmh",
+      "email": "joshmh@gmail.com"
+    },
+    {
+      "name": "meedamian",
+      "email": "mee.damian@gmail.com"
+    }
+  ],
+  "dist": {
+    "shasum": "df8d903cb37e8ae4e4658e6e74bbea5efbf5026f",
+    "tarball": "http://registry.npmjs.org/lamassu-bitstamp/-/lamassu-bitstamp-1.0.2.tgz"
+  },
+  "directories": {},
+  "_resolved": "https://registry.npmjs.org/lamassu-bitstamp/-/lamassu-bitstamp-1.0.2.tgz",
+  "readme": "ERROR: No README data found!"
+}
