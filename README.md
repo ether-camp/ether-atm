@@ -1,5 +1,5 @@
 # Ether ATM
-This is a modified version of the Trofa model of the Lamassu ATM to support two currencies - BTC and ETH.
+This is a modified version of the one-way Trofa model of the Lamassu ATM to support two currencies - BTC and ETH.
 To install it, you need to:
 * Patch the UI, brain and trader files in the machine to support ETH (diff patch files).
 * Install lamassu-geth and lamassu-kraken server plugins for the ticker, trader and wallet.
